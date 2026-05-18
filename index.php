@@ -22,31 +22,98 @@ define('ACTIVITY_LOG_FILE', __DIR__ . '/dedup_activity.log');
 define('JSON_PREVIEW_FILE', __DIR__ . '/b24_dedup_test_log.json');
 
 // ==========================================================================
-// 2. EXTRACTION LAYER (FIX FOR APPLICATION/JSON & GET HANDLERS)
+// 2. EXTRACTION LAYER (BITRIX24 WEBHOOK / ROBOT PAYLOAD HANDLERS)
 // ==========================================================================
-$entityIdFromWebhook = $_POST['data']['id'] 
-                       ?? $_POST['data']['FIELDS']['ID'] 
-                       ?? $_POST['id'] 
-                       ?? $_GET['id'] 
-                       ?? null;
-
-// Fallback: Parse raw payload input stream if standard post arrays turn up empty
-if (empty($entityIdFromWebhook)) {
-    $rawInputStream = file_get_contents('php://input');
-    if (!empty($rawInputStream)) {
-        $parsedJson = json_decode($rawInputStream, true);
-        $entityIdFromWebhook = $parsedJson['data']['id'] 
-                               ?? $parsedJson['data']['FIELDS']['ID'] 
-                               ?? $parsedJson['id'] 
-                               ?? null;
+function getNestedValue($source, $path) {
+    $cursor = $source;
+    foreach ($path as $key) {
+        if (!is_array($cursor) || !array_key_exists($key, $cursor)) {
+            return null;
+        }
+        $cursor = $cursor[$key];
     }
+    return $cursor;
 }
 
-define('TARGET_SPA_ID', (int)$entityIdFromWebhook); 
+function normalizeWebhookId($value) {
+    if (is_array($value)) {
+        $value = end($value);
+    }
+
+    $value = trim((string)$value);
+    if ($value === '') {
+        return 0;
+    }
+
+    if (ctype_digit($value)) {
+        return (int)$value;
+    }
+
+    // Handles Bitrix document IDs such as DYNAMIC_1038_123 or CRM_DYNAMIC_1038_123.
+    if (preg_match('/(\d+)$/', $value, $matches)) {
+        return (int)$matches[1];
+    }
+
+    return 0;
+}
+
+function getIncomingPayload() {
+    $payload = $_REQUEST;
+    $rawInputStream = file_get_contents('php://input');
+
+    if ($rawInputStream !== '') {
+        $jsonPayload = json_decode($rawInputStream, true);
+        if (json_last_error() === JSON_ERROR_NONE && is_array($jsonPayload)) {
+            $payload = array_replace_recursive($payload, $jsonPayload);
+        } else {
+            $formPayload = [];
+            parse_str($rawInputStream, $formPayload);
+            if (!empty($formPayload)) {
+                $payload = array_replace_recursive($payload, $formPayload);
+            }
+        }
+    }
+
+    return $payload;
+}
+
+function extractTargetSpaId($payload) {
+    $candidatePaths = [
+        ['data', 'id'],
+        ['data', 'ID'],
+        ['data', 'FIELDS', 'ID'],
+        ['data', 'FIELDS', 'id'],
+        ['FIELDS', 'ID'],
+        ['FIELDS', 'id'],
+        ['item', 'id'],
+        ['item', 'ID'],
+        ['id'],
+        ['ID'],
+        ['entityId'],
+        ['entity_id'],
+        ['ENTITY_ID'],
+        ['document_id'],
+    ];
+
+    foreach ($candidatePaths as $path) {
+        $id = normalizeWebhookId(getNestedValue($payload, $path));
+        if ($id > 0) {
+            return $id;
+        }
+    }
+
+    return 0;
+}
+
+$incomingPayload = getIncomingPayload();
+$entityIdFromWebhook = extractTargetSpaId($incomingPayload);
+
+define('TARGET_SPA_ID', $entityIdFromWebhook); 
 
 // Safeguard: Stop execution if no valid record ID is found
 if (TARGET_SPA_ID <= 0) {
     writeLog("Engine halted: No valid dynamic SPA ID received from Bitrix24 webhook event payload.", 'INFO');
+    writeLog("Incoming payload keys detected: " . implode(', ', array_keys($incomingPayload)), 'DEBUG');
     exit(0);
 }
 
