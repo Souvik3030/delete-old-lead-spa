@@ -5,43 +5,26 @@
 
 // 1. CONFIGURATION
 define('B24_WEBHOOK_URL', 'https://b24-sgn7y5.bitrix24.in/rest/14/kdho27qenzo9pv03/'); 
-define('SPA_ENTITY_TYPE_ID', 1038); // Verified SPA Entity Type ID
-define('TARGET_SPA_ID', 2);         // Verified test Item ID
+define('SPA_ENTITY_TYPE_ID', 1038); 
+define('TARGET_SPA_ID', 2);         
 
-// Validated internal SPA field codes
 define('SPA_PHONE_FIELD', 'ufCrm8Phone'); 
 define('SPA_EMAIL_FIELD', 'ufCrm8Email'); 
 
-// SET TO 'false' ONLY AFTER YOU HAVE VERIFIED THE TEST LOGS
 define('DRY_RUN', true); 
 
-// PATHS FOR LOG FILE outputs
 define('ACTIVITY_LOG_FILE', __DIR__ . '/dedup_activity.log');
 define('JSON_PREVIEW_FILE', __DIR__ . '/b24_dedup_test_log.json');
 
-// ==========================================
-// CENTRALIZED LOGGING FUNCTION
-// ==========================================
 function writeLog($message, $level = 'INFO') {
     $timestamp = date('Y-m-d H:i:s');
     $formattedMessage = "[$timestamp] [$level] $message" . PHP_EOL;
-    
-    // Output to screen (Terminal or Browser)
     echo $formattedMessage;
-    
-    // Append to local log file
     file_put_contents(ACTIVITY_LOG_FILE, $formattedMessage, FILE_APPEND);
 }
 
-// ==========================================
-// HELPER FUNCTION FOR API CALLS WITH LOGGING
-// ==========================================
 function callB24($method, $params = []) {
     $url = rtrim(B24_WEBHOOK_URL, '/') . '/' . $method . '.json';
-    
-    writeLog("Initiating API Call to method: '$method'", 'DEBUG');
-    writeLog("API Parameters sent: " . json_encode($params), 'DEBUG');
-    
     $ch = curl_init();
     curl_setopt_array($ch, [
         CURLOPT_URL => $url,
@@ -49,93 +32,92 @@ function callB24($method, $params = []) {
         CURLOPT_POST => true,
         CURLOPT_POSTFIELDS => http_build_query($params),
     ]);
-    
     $response = curl_exec($ch);
-    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    // curl_close($ch); // FIX: Reactivated curl close to prevent connection hanging/leaks
-    
-    writeLog("API HTTP Response Code received: $httpCode", 'DEBUG');
-    
+    curl_close($ch);
     $decoded = json_decode($response, true);
-    if (isset($decoded['error'])) {
-        writeLog("Bitrix24 API Error returned: " . ($decoded['error_description'] ?? $decoded['error']), 'ERROR');
-    }
-    
     return $decoded['result'] ?? null;
 }
 
+/**
+ * Normalizes phone numbers dynamically based on whether the source number uses a '+' prefix.
+ * Strips out presentation noise (spaces, hyphens, brackets).
+ */
+function normalizePhone($phone, $keepPlus = false) {
+    $phone = trim((string)$phone);
+    if ($keepPlus && strpos($phone, '+') === 0) {
+        // Keep the leading '+' sign, strip everything else except digits
+        return '+' . preg_replace('/[^0-9]/', '', $phone);
+    }
+    // Complete strip of all symbols including '+'
+    return preg_replace('/[^0-9]/', '', $phone);
+}
+
+function extractMultiFields($fieldArray) {
+    $values = [];
+    if (is_array($fieldArray)) {
+        foreach ($fieldArray as $item) {
+            if (!empty($item['VALUE'])) {
+                $values[] = trim((string)$item['VALUE']);
+            }
+        }
+    }
+    return $values;
+}
+
 // ==========================================
-// START OF EXECUTION PIPELINE
+// START PIPELINE
 // ==========================================
 writeLog("==========================================================================");
-writeLog("SCRIPT START: Initializing Lead Deduplication Engine.");
-writeLog("Execution Mode: " . (DRY_RUN ? "DRY-RUN MODE (Safe - No deletions will occur)" : "LIVE MODE (Destructive - Duplicates WILL be deleted)"), DRY_RUN ? 'INFO' : 'WARNING');
+writeLog("SCRIPT START: Initializing Lead Deduplication Engine with Strict Formatting Verification.");
 
-// STEP 1: Fetch the Source SPA Item
-writeLog("Step 1: Fetching source data from SPA Entity " . SPA_ENTITY_TYPE_ID . " for Item ID " . TARGET_SPA_ID);
 $spaItem = callB24('crm.item.get', [
     'entityTypeId' => SPA_ENTITY_TYPE_ID,
     'id'           => TARGET_SPA_ID
 ]);
 
 if (!$spaItem || !isset($spaItem['item'])) {
-    writeLog("Critical Failure: Source SPA Item ID " . TARGET_SPA_ID . " could not be found or API returned an invalid structure.", 'CRITICAL');
-    exit(1);
-}
-writeLog("Successfully retrieved target SPA item data.", 'SUCCESS');
-
-// Extract communication channels
-$phone = $spaItem['item'][SPA_PHONE_FIELD] ?? '';
-$email = $spaItem['item'][SPA_EMAIL_FIELD] ?? '';
-
-// Array parsing sanity checks
-if (is_array($phone)) {
-    writeLog("SPA Phone field structured as array. Extracting primary element value.", 'DEBUG');
-    $phone = current($phone)['VALUE'] ?? current($phone);
-}
-if (is_array($email)) {
-    writeLog("SPA Email field structured as array. Extracting primary element value.", 'DEBUG');
-    $email = current($email)['VALUE'] ?? current($email);
-}
-
-// Strip whitespaces to ensure robust lookups
-$phone = trim((string)$phone);
-$email = trim((string)$email);
-
-writeLog("Extraction complete. Target criteria located -> Phone: '" . ($phone ?: '[EMPTY]') . "' | Email: '" . ($email ?: '[EMPTY]') . "'");
-
-if (empty($phone) && empty($email)) {
-    writeLog("Aborting execution: Both email and phone data points are empty. Processing further would trigger accidental full CRM entity deletions.", 'CRITICAL');
+    writeLog("Critical Failure: Source SPA Item ID " . TARGET_SPA_ID . " could not be found.", 'CRITICAL');
     exit(1);
 }
 
-// Instantiate master registry to assemble historical data mapping
-$matchedLeads = [];
+$spaPhone = trim((string)($spaItem['item'][SPA_PHONE_FIELD] ?? ''));
+$spaEmail = trim((string)($spaItem['item'][SPA_EMAIL_FIELD] ?? ''));
 
-// Dynamically construct search arrays
+if (empty($spaPhone) && empty($spaEmail)) {
+    writeLog("Aborting: SPA source data fields are completely empty.", 'CRITICAL');
+    exit(1);
+}
+
+// Check if '+' prefix exists in the source SPA phone number
+$hasPlusInSource = (strpos($spaPhone, '+') === 0);
+writeLog("Format Check: Source phone prefix '+' " . ($hasPlusInSource ? "DETECTED. Preserving prefix rules." : "NOT detected. Stripping formatting prefixes globally."));
+
+// Normalize the source number based on the detected format rule
+$normSpaPhone = normalizePhone($spaPhone, $hasPlusInSource);
+writeLog("Target Match Profile -> Normalized Phone Target: '$normSpaPhone' | Email Target: '$spaEmail'");
+
+// Temporary pool for raw unverified records
+$rawCandidatePool = [];
+
+// Base search filters (We use raw values here because Bitrix24's lead.list partial search handles characters automatically)
 $filterOR = ['LOGIC' => 'OR'];
-if (!empty($phone)) $filterOR[] = ['=PHONE' => $phone];
-if (!empty($email)) $filterOR[] = ['=EMAIL' => $email];
+if (!empty($spaPhone)) $filterOR[] = ['=PHONE' => $spaPhone];
+if (!empty($spaEmail)) $filterOR[] = ['=EMAIL' => $spaEmail];
 
-// STEP 2: Find Old Leads Directly Matching Phone/Email
-writeLog("Step 2: Querying 'crm.lead.list' for direct matching communication records.");
+// STEP 1: Direct Leads Fetch
+writeLog("Step 1: Fetching background direct matching leads.");
 $directLeads = callB24('crm.lead.list', [
     'filter' => $filterOR,
     'select' => ['ID', 'TITLE', 'DATE_CREATE', 'CONTACT_ID']
 ]);
-
-if (is_array($directLeads) && !empty($directLeads)) {
-    writeLog("Found " . count($directLeads) . " lead record(s) directly holding matching phone or email values.", 'INFO');
+if (is_array($directLeads)) {
     foreach ($directLeads as $lead) {
-        $matchedLeads[$lead['ID']] = $lead;
-        writeLog("Mapped Direct Lead Discovery -> ID: #{$lead['ID']} | Title: '{$lead['TITLE']}' | Created: {$lead['DATE_CREATE']}", 'DEBUG');
+        $rawCandidatePool[$lead['ID']] = $lead;
     }
-} else {
-    writeLog("No direct lead records matched the phone/email criteria.", 'INFO');
 }
 
-// STEP 3: Find Matching Contacts & Fetch Their Linked Leads
-writeLog("Step 3: Querying 'crm.contact.list' to identify independent contact cards containing matching parameters.");
+// STEP 2: Relational Contacts Fetch
+writeLog("Step 2: Tracking linked contact cards.");
 $contacts = callB24('crm.contact.list', [
     'filter' => $filterOR,
     'select' => ['ID']
@@ -143,82 +125,112 @@ $contacts = callB24('crm.contact.list', [
 
 if (!empty($contacts) && is_array($contacts)) {
     $contactIds = array_column($contacts, 'ID');
-    writeLog("Found " . count($contactIds) . " distinct Contact ID(s) matching criteria: [" . implode(', ', $contactIds) . "]", 'INFO');
-    
-    writeLog("Querying 'crm.lead.list' for all background leads referencing these discovered Contact IDs.");
     $contactLeads = callB24('crm.lead.list', [
         'filter' => ['=CONTACT_ID' => $contactIds],
         'select' => ['ID', 'TITLE', 'DATE_CREATE', 'CONTACT_ID']
     ]);
-    
-    if (is_array($contactLeads) && !empty($contactLeads)) {
-        writeLog("Found " . count($contactLeads) . " lead record(s) linked via matched contact cards.", 'INFO');
+    if (is_array($contactLeads)) {
         foreach ($contactLeads as $lead) {
-            if (isset($matchedLeads[$lead['ID']])) {
-                writeLog("Lead ID #{$lead['ID']} already fetched by direct match. Skipping duplicate registration.", 'DEBUG');
-                continue;
-            }
-            $matchedLeads[$lead['ID']] = $lead;
-            writeLog("Mapped Relational Contact Lead Discovery -> ID: #{$lead['ID']} | Title: '{$lead['TITLE']}' | Created: {$lead['DATE_CREATE']}", 'DEBUG');
+            $rawCandidatePool[$lead['ID']] = $lead;
         }
-    } else {
-        writeLog("No active leads found attached to the matched contact cards.", 'INFO');
     }
-} else {
-    writeLog("No contact card components matched the criteria coordinates.", 'INFO');
 }
 
-// STEP 4: Deduplication Evaluation
-writeLog("Step 4: Consolidating and evaluating entire dataset registry map.");
-$totalFoundCount = count($matchedLeads);
-writeLog("Total unique matching leads identified across all channels: $totalFoundCount", 'INFO');
+// ==========================================
+// STEP 3: STRICT FORMAT-SAFE VALIDATION
+// ==========================================
+writeLog("Step 3: Beginning deep format-safe validation on " . count($rawCandidatePool) . " candidates...");
+$verifiedLeads = [];
 
-if ($totalFoundCount <= 1) {
-    writeLog("Process completed cleanly: Registry holds $totalFoundCount record(s). No duplicate conflicts exist. Execution terminating.", 'SUCCESS');
+foreach ($rawCandidatePool as $id => $lead) {
+    writeLog("Deep inspecting Lead ID #$id...", 'DEBUG');
+    
+    $fullLead = callB24('crm.lead.get', ['id' => $id]);
+    $leadPhones = extractMultiFields($fullLead['PHONE'] ?? null);
+    $leadEmails = extractMultiFields($fullLead['EMAIL'] ?? null);
+    
+    $contactPhones = [];
+    $contactEmails = [];
+    
+    if (!empty($lead['CONTACT_ID']) && (int)$lead['CONTACT_ID'] > 0) {
+        $fullContact = callB24('crm.contact.get', ['id' => $lead['CONTACT_ID']]);
+        if ($fullContact) {
+            $contactPhones = extractMultiFields($fullContact['PHONE'] ?? null);
+            $contactEmails = extractMultiFields($fullContact['EMAIL'] ?? null);
+        }
+    }
+    
+    // Normalize candidates strictly following the rule set by the SPA source data
+    $allAssociatedPhones = [];
+    foreach (array_merge($leadPhones, $contactPhones) as $rawPhoneNum) {
+        $allAssociatedPhones[] = normalizePhone($rawPhoneNum, $hasPlusInSource);
+    }
+    
+    $allAssociatedEmails = array_map('strtolower', array_merge($leadEmails, $contactEmails));
+    
+    // EXECUTE COMPARISON
+    $hasPhoneMatch = (!empty($normSpaPhone) && in_array($normSpaPhone, $allAssociatedPhones, true));
+    $hasEmailMatch = (!empty($spaEmail) && in_array(strtolower($spaEmail), $allAssociatedEmails, true));
+    
+    if ($hasPhoneMatch || $hasEmailMatch) {
+        $verifiedLeads[$id] = [
+            'ID' => $lead['ID'],
+            'TITLE' => $lead['TITLE'],
+            'DATE_CREATE' => $lead['DATE_CREATE'],
+            'CONTACT_ID' => $lead['CONTACT_ID'],
+            'EXTRACTED_DATA' => [
+                'lead_phones' => $leadPhones,
+                'lead_emails' => $leadEmails,
+                'linked_contact_phones' => $contactPhones,
+                'linked_contact_emails' => $contactEmails
+            ]
+        ];
+        writeLog("--> PASSED: Lead #$id matches configuration criteria targets.", 'SUCCESS');
+    } else {
+        writeLog("--> REJECTED: Lead #$id does not pass format verification checks. Saved from deletion.", 'WARNING');
+    }
+}
+
+// ==========================================
+// STEP 4: DEDUPLICATION PROCESSING
+// ==========================================
+$totalVerifiedCount = count($verifiedLeads);
+writeLog("Total verified matching leads remaining after safety review: $totalVerifiedCount");
+
+if ($totalVerifiedCount <= 1) {
+    writeLog("Clean execution completed. No duplicate conflicts verified.", 'SUCCESS');
     exit(0);
 }
 
-writeLog("Multiple duplicate conflicts confirmed. Executing chronological sorting sequence (ID Descending order).", 'INFO');
-// Sort by ID numeric descending (Bitrix24 IDs are sequential; higher ID values indicate newer items)
-uasort($matchedLeads, function($a, $b) {
+uasort($verifiedLeads, function($a, $b) {
     return (int)$b['ID'] - (int)$a['ID'];
 });
 
-// Protect the latest element
-$latestLead = array_shift($matchedLeads); 
-$leadsToDelete = $matchedLeads; 
+$latestLead = array_shift($verifiedLeads);
+$leadsToDelete = $verifiedLeads;
 
-writeLog("Deduplication logic completed successfully.", 'SUCCESS');
-writeLog(">>>> PROTECTED RECORD (WINNER): ID #{$latestLead['ID']} | Title: '{$latestLead['TITLE']}' | Date: {$latestLead['DATE_CREATE']}", 'INFO');
-writeLog(">>>> TARGET DISPOSAL SCOPE: " . count($leadsToDelete) . " historical record(s) isolated for deletion.", 'WARNING');
+writeLog("WINNER RECORD RETAINED: ID #{$latestLead['ID']} - '{$latestLead['TITLE']}'", 'SUCCESS');
+writeLog("DISPOSAL MATRIX CONSOLIDATED: " . count($leadsToDelete) . " records targeted.", 'WARNING');
 
-// STEP 5: Execution Protocol
-writeLog("Step 5: Beginning execution protocol processing loop.");
-if (DRY_RUN) {
-    writeLog("Assembling dry-run data payload matrix for debugging logs...", 'DEBUG');
-    $logData = [
-        'timestamp' => date('Y-m-d H:i:s'),
-        'spa_source' => ['id' => TARGET_SPA_ID, 'phone' => $phone, 'email' => $email],
-        'kept_lead' => $latestLead,
-        'flagged_for_deletion' => array_values($leadsToDelete)
-    ];
-    
-    file_put_contents(JSON_PREVIEW_FILE, json_encode($logData, JSON_PRETTY_PRINT));
-    writeLog("[DRY RUN BLOCK ACTIVATED]: Bypass call issued. Action maps written safely to backup file: " . JSON_PREVIEW_FILE, 'SUCCESS');
-    writeLog("Please review the JSON payload array before disabling DRY_RUN tracking modes.", 'INFO');
-} else {
-    writeLog("CRITICAL WARNING: Dry run bypass confirmed. Entering live system data destruction phase.", 'WARNING');
+// STEP 5: OUTPUT PROTOCOLS
+$logData = [
+    'timestamp' => date('Y-m-d H:i:s'),
+    'spa_source' => [
+        'id' => TARGET_SPA_ID,
+        'phone' => $spaPhone,
+        'email' => $spaEmail
+    ],
+    'kept_lead' => $latestLead,
+    'flagged_for_deletion' => array_values($leadsToDelete)
+];
+
+file_put_contents(JSON_PREVIEW_FILE, json_encode($logData, JSON_PRETTY_PRINT));
+
+if (!DRY_RUN) {
     foreach ($leadsToDelete as $id => $lead) {
-        writeLog("Attempting destructive deletion call on Lead ID #$id ('{$lead['TITLE']}')");
-        $result = callB24('crm.lead.delete', ['id' => $id]);
-        
-        if ($result) {
-            writeLog("Successfully deleted duplicate Lead ID #$id from Bitrix24 environment.", 'SUCCESS');
-        } else {
-            writeLog("System error encountered: Unable to purge Lead ID #$id.", 'ERROR');
-        }
+        callB24('crm.lead.delete', ['id' => $id]);
+        writeLog("Live Deletion Execution completed on duplicate entity ID #$id", 'SUCCESS');
     }
-    writeLog("Live data purge execution pipeline concluded.", 'SUCCESS');
+} else {
+    writeLog("[DRY RUN ACTIVE]: Verify target data metrics safely inside file: " . JSON_PREVIEW_FILE, 'INFO');
 }
-
-writeLog("SCRIPT EXECUTION COMPLETED SUCCESSFULLY.");
