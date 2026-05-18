@@ -13,7 +13,7 @@ define('SPA_ENTITY_TYPE_ID', 1038);
 // Field Mapping Definitions
 define('SPA_PHONE_FIELD', 'ufCrm8Phone'); 
 define('SPA_EMAIL_FIELD', 'ufCrm8Email'); 
-define('MATCHING_RULE', 'same_normalized_phone_only');
+define('MATCHING_RULE', 'same_last_10_phone_digits');
 
 // Code-level default. Runtime override examples:
 // URL: index.php?dry_run=true   or   index.php?dry_run=false
@@ -123,6 +123,16 @@ function normalizePhone($phone) {
     return $normalized;
 }
 
+function getPhoneMatchKey($phone) {
+    $digitsOnly = preg_replace('/[^0-9]/', '', normalizePhone($phone));
+
+    if (strlen($digitsOnly) > 10) {
+        return substr($digitsOnly, -10);
+    }
+
+    return $digitsOnly;
+}
+
 function normalizeEmail($email) {
     return strtolower(trim((string)$email));
 }
@@ -133,7 +143,9 @@ function getMatchedBy($source, $candidate) {
     if (
         !empty($source['NORM_PHONE']) &&
         !empty($candidate['NORM_PHONE']) &&
-        $source['NORM_PHONE'] === $candidate['NORM_PHONE']
+        !empty($source['PHONE_MATCH_KEY']) &&
+        !empty($candidate['PHONE_MATCH_KEY']) &&
+        $source['PHONE_MATCH_KEY'] === $candidate['PHONE_MATCH_KEY']
     ) {
         $matchedBy[] = 'phone';
     }
@@ -175,6 +187,7 @@ function previewRecord($record, $matchedBy = []) {
         'DATE_CREATE' => $record['DATE_CREATE'],
         'PHONE'       => $record['PHONE'],
         'NORMALIZED_PHONE' => $record['NORM_PHONE'] ?? normalizePhone($record['PHONE']),
+        'PHONE_MATCH_KEY' => $record['PHONE_MATCH_KEY'] ?? getPhoneMatchKey($record['PHONE']),
         'EMAIL'       => $record['EMAIL']
     ];
 
@@ -223,6 +236,7 @@ do {
                 'DATE_CREATE' => $item['dateCreate'] ?? '',
                 'PHONE'       => $phone,
                 'NORM_PHONE'  => normalizePhone($phone),
+                'PHONE_MATCH_KEY' => getPhoneMatchKey($phone),
                 'EMAIL'       => normalizeEmail($email)
             ];
         }
@@ -276,6 +290,7 @@ foreach ($allRecords as $source) {
         'source_spa_item' => previewRecord($source),
         'matching_profile' => [
             'normalized_phone' => $source['NORM_PHONE'],
+            'phone_match_key'  => $source['PHONE_MATCH_KEY'],
             'email'            => $source['EMAIL']
         ],
         'count' => count($duplicates) + 1,
