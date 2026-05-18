@@ -13,7 +13,7 @@ define('SPA_ENTITY_TYPE_ID', 1038);
 // Field Mapping Definitions
 define('SPA_PHONE_FIELD', 'ufCrm8Phone'); 
 define('SPA_EMAIL_FIELD', 'ufCrm8Email'); 
-define('MATCHING_RULE', 'same_normalized_phone_only');
+define('MATCHING_RULE', 'same_normalized_phone_and_same_email');
 
 // Code-level default. Runtime override examples:
 // URL: index.php?dry_run=true   or   index.php?dry_run=false
@@ -111,16 +111,12 @@ function resolveDryRunFlag($defaultValue) {
 }
 
 function normalizePhone($phone) {
-    // Keep a leading '+' when present and keep every digit so country codes remain part of the comparison.
-    // Examples: +91 9876543210 => +919876543210, +971 501234567 => +971501234567.
     $phone = trim((string)$phone);
-    $normalized = preg_replace('/[^0-9]/', '', $phone);
-
-    if (strpos($phone, '+') === 0 && $normalized !== '') {
-        return '+' . $normalized;
+    $keepPlus = (strpos($phone, '+') === 0);
+    if ($keepPlus) {
+        return '+' . preg_replace('/[^0-9]/', '', $phone);
     }
-
-    return $normalized;
+    return preg_replace('/[^0-9]/', '', $phone);
 }
 
 function normalizeEmail($email) {
@@ -138,12 +134,20 @@ function getMatchedBy($source, $candidate) {
         $matchedBy[] = 'phone';
     }
 
+    if (
+        !empty($source['EMAIL']) &&
+        !empty($candidate['EMAIL']) &&
+        $source['EMAIL'] === $candidate['EMAIL']
+    ) {
+        $matchedBy[] = 'email';
+    }
+
     return $matchedBy;
 }
 
-function isPhoneDuplicateMatch($source, $candidate) {
+function isStrictDuplicateMatch($source, $candidate) {
     $matchedBy = getMatchedBy($source, $candidate);
-    return in_array('phone', $matchedBy, true);
+    return in_array('phone', $matchedBy, true) && in_array('email', $matchedBy, true);
 }
 
 function getRecordSortTimestamp($record) {
@@ -214,8 +218,8 @@ do {
         $phone = trim((string)($item[SPA_PHONE_FIELD] ?? ''));
         $email = strtolower(trim((string)($item[SPA_EMAIL_FIELD] ?? '')));
 
-        // Track phone profiles. Email stays in the output, but matching is phone-only.
-        if (!empty($phone)) {
+        // Track only complete profiles. Strict duplicate matching requires both phone and email.
+        if (!empty($phone) && !empty($email)) {
             $allRecords[] = [
                 'ID'          => (int)$item['id'],
                 'TITLE'       => $item['title'] ?? 'Untitled SPA',
@@ -230,7 +234,7 @@ do {
     $startRow = $response['next'] ?? null;
 } while ($startRow !== null);
 
-writeLog("Total valid records with usable Phone fetched: " . count($allRecords));
+writeLog("Total valid records with usable Phone AND Email fetched: " . count($allRecords));
 
 // Step 2: Fully automated source-by-source matching across the entire SPA.
 $flaggedMatrix = [];
@@ -254,7 +258,7 @@ foreach ($allRecords as $source) {
             continue;
         }
 
-        if (isPhoneDuplicateMatch($source, $candidate)) {
+        if (isStrictDuplicateMatch($source, $candidate)) {
             $matchedBy = getMatchedBy($source, $candidate);
             $cluster[] = $candidate;
             $matchDetails[$candidate['ID']] = $matchedBy;
