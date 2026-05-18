@@ -4,13 +4,13 @@
  */
 
 // 1. CONFIGURATION
-define('B24_WEBHOOK_URL', 'https://your-domain.bitrix24.com/rest/1/your-webhook-token/'); 
-define('SPA_ENTITY_TYPE_ID', 1032); // Replace with your actual SPA Entity Type ID
-define('TARGET_SPA_ID', 5);         // The specific SPA item ID you want to check
+define('B24_WEBHOOK_URL', 'https://b24-sgn7y5.bitrix24.in/rest/14/kdho27qenzo9pv03/'); 
+define('SPA_ENTITY_TYPE_ID', 1038); // Replace with your actual SPA Entity Type ID
+define('TARGET_SPA_ID', 2);         // The specific SPA item ID you want to check
 
 // Adjust these to match the exact field codes where phone/email are stored in your SPA
-define('SPA_PHONE_FIELD', 'UF_CRM_X_PHONE'); 
-define('SPA_EMAIL_FIELD', 'UF_CRM_X_EMAIL'); 
+define('SPA_PHONE_FIELD', 'UF_CRM_8_PHONE'); 
+define('SPA_EMAIL_FIELD', 'UF_CRM_8_EMAIL'); 
 
 // SET TO 'false' ONLY AFTER YOU HAVE VERIFIED THE TEST LOGS
 define('DRY_RUN', true); 
