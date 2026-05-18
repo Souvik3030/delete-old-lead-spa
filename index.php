@@ -1,8 +1,13 @@
 <?php
 /**
  * Bitrix24 Bulk SPA Deduplication & Flagging Engine
- * File Name: bulk_dedup.php
- */
+ * File Name: index.php
+ * https://myemirateshome.com/jenkins-automation/delete-old-lead-spa/index.php?dry_run=false
+ * https://myemirateshome.com/jenkins-automation/delete-old-lead-spa/index.php?dry_run=true
+ * 
+ * // By default dry_run is true
+ * https://myemirateshome.com/jenkins-automation/delete-old-lead-spa/index.php 
+*/
 
 // ==========================================================================
 // 1. GLOBAL SYSTEM CONFIGURATION
