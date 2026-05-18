@@ -125,15 +125,50 @@ function normalizeEmail($email) {
 function getMatchedBy($source, $candidate) {
     $matchedBy = [];
 
-    if (!empty($source['NORM_PHONE']) && $source['NORM_PHONE'] === $candidate['NORM_PHONE']) {
+    if (
+        !empty($source['NORM_PHONE']) &&
+        !empty($candidate['NORM_PHONE']) &&
+        $source['NORM_PHONE'] === $candidate['NORM_PHONE']
+    ) {
         $matchedBy[] = 'phone';
     }
 
-    if (!empty($source['EMAIL']) && $source['EMAIL'] === $candidate['EMAIL']) {
+    if (
+        !empty($source['EMAIL']) &&
+        !empty($candidate['EMAIL']) &&
+        $source['EMAIL'] === $candidate['EMAIL']
+    ) {
         $matchedBy[] = 'email';
     }
 
     return $matchedBy;
+}
+
+function isStrictDuplicateMatch($source, $candidate) {
+    $matchedBy = getMatchedBy($source, $candidate);
+    return in_array('phone', $matchedBy, true) && in_array('email', $matchedBy, true);
+}
+
+function getRecordSortTimestamp($record) {
+    if (!empty($record['DATE_CREATE'])) {
+        $timestamp = strtotime($record['DATE_CREATE']);
+        if ($timestamp !== false) {
+            return $timestamp;
+        }
+    }
+
+    return 0;
+}
+
+function compareNewestRecords($a, $b) {
+    $aTime = getRecordSortTimestamp($a);
+    $bTime = getRecordSortTimestamp($b);
+
+    if ($aTime !== $bTime) {
+        return $bTime <=> $aTime;
+    }
+
+    return (int)$b['ID'] <=> (int)$a['ID'];
 }
 
 function previewRecord($record, $matchedBy = []) {
@@ -181,8 +216,8 @@ do {
         $phone = trim((string)($item[SPA_PHONE_FIELD] ?? ''));
         $email = strtolower(trim((string)($item[SPA_EMAIL_FIELD] ?? '')));
 
-        // Track any usable SPA source. A record can match by phone, email, or both.
-        if (!empty($phone) || !empty($email)) {
+        // Track only complete profiles. Strict duplicate matching requires both phone and email.
+        if (!empty($phone) && !empty($email)) {
             $allRecords[] = [
                 'ID'          => (int)$item['id'],
                 'TITLE'       => $item['title'] ?? 'Untitled SPA',
@@ -197,7 +232,7 @@ do {
     $startRow = $response['next'] ?? null;
 } while ($startRow !== null);
 
-writeLog("Total valid records with usable Phone OR Email fetched: " . count($allRecords));
+writeLog("Total valid records with usable Phone AND Email fetched: " . count($allRecords));
 
 // Step 2: Fully automated source-by-source matching across the entire SPA.
 $flaggedMatrix = [];
@@ -221,8 +256,8 @@ foreach ($allRecords as $source) {
             continue;
         }
 
-        $matchedBy = getMatchedBy($source, $candidate);
-        if (!empty($matchedBy)) {
+        if (isStrictDuplicateMatch($source, $candidate)) {
+            $matchedBy = getMatchedBy($source, $candidate);
             $cluster[] = $candidate;
             $matchDetails[$candidate['ID']] = $matchedBy;
         }
@@ -233,10 +268,7 @@ foreach ($allRecords as $source) {
         continue;
     }
 
-    // Sort cluster descending by ID. Newest record ends up at index 0.
-    usort($cluster, function($a, $b) {
-        return $b['ID'] - $a['ID'];
-    });
+    usort($cluster, 'compareNewestRecords');
 
     $winner = array_shift($cluster);
     $duplicates = $cluster;
@@ -248,7 +280,7 @@ foreach ($allRecords as $source) {
             'email'            => $source['EMAIL']
         ],
         'count' => count($duplicates) + 1,
-        'kept_winner' => previewRecord($winner, $matchDetails[$winner['ID']] ?? []),
+        'kept_latest_item' => previewRecord($winner, $matchDetails[$winner['ID']] ?? []),
         'duplicates_flagged' => array_map(function($d) use ($matchDetails) {
             return previewRecord($d, $matchDetails[$d['ID']] ?? []);
         }, $duplicates)
