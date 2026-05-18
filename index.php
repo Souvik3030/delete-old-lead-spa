@@ -14,8 +14,13 @@ define('SPA_ENTITY_TYPE_ID', 1038);
 define('SPA_PHONE_FIELD', 'ufCrm8Phone'); 
 define('SPA_EMAIL_FIELD', 'ufCrm8Email'); 
 
-// CONTROL TOGGLE: Set to true to map and preview flags in JSON. Set to false to delete live.
-define('DRY_RUN', true); 
+// Code-level default. Runtime override examples:
+// URL: index.php?dry_run=true   or   index.php?dry_run=false
+// CLI: php index.php dry_run=true   or   php index.php dry_run=false
+define('DEFAULT_DRY_RUN', true);
+$dryRunConfig = resolveDryRunFlag(DEFAULT_DRY_RUN);
+define('DRY_RUN', $dryRunConfig['value']);
+define('DRY_RUN_SOURCE', $dryRunConfig['source']);
 
 // Filesystem Output Destinations
 define('BULK_LOG_FILE', __DIR__ . '/bulk_dedup_activity.log');
@@ -47,6 +52,61 @@ function callB24($method, $params = []) {
     curl_close($ch);
     $decoded = json_decode($response, true);
     return $decoded;
+}
+
+function resolveDryRunFlag($defaultValue) {
+    $acceptedKeys = ['dry_run', 'dryrun', 'DRY_RUN'];
+    $rawValue = null;
+    $source = 'code default';
+
+    foreach ($acceptedKeys as $key) {
+        if (isset($_GET[$key])) {
+            $rawValue = $_GET[$key];
+            $source = "URL parameter '$key'";
+            break;
+        }
+
+        if (isset($_POST[$key])) {
+            $rawValue = $_POST[$key];
+            $source = "POST parameter '$key'";
+            break;
+        }
+    }
+
+    if ($rawValue === null && PHP_SAPI === 'cli' && !empty($_SERVER['argv'])) {
+        foreach (array_slice($_SERVER['argv'], 1) as $arg) {
+            if (strpos($arg, '=') === false) {
+                continue;
+            }
+
+            [$key, $value] = explode('=', $arg, 2);
+            if (in_array($key, $acceptedKeys, true)) {
+                $rawValue = $value;
+                $source = "CLI argument '$key'";
+                break;
+            }
+        }
+    }
+
+    if ($rawValue === null || $rawValue === '') {
+        return [
+            'value' => (bool)$defaultValue,
+            'source' => $source
+        ];
+    }
+
+    $parsedValue = filter_var($rawValue, FILTER_VALIDATE_BOOLEAN, FILTER_NULL_ON_FAILURE);
+    if ($parsedValue === null) {
+        return [
+            'value' => (bool)$defaultValue,
+            'source' => "$source ignored invalid value '$rawValue'; using code default"
+        ];
+    }
+
+    return [
+        'value' => $parsedValue,
+        'source' => "$source value '$rawValue'"
+    ];
 }
 
 function normalizePhone($phone) {
@@ -98,7 +158,7 @@ function previewRecord($record, $matchedBy = []) {
 
 writeLog("==========================================================================");
 writeLog("STARTING BULK SCAN: Fetching all records for SPA Entity " . SPA_ENTITY_TYPE_ID);
-writeLog("Mode: " . (DRY_RUN ? "DRY-RUN (Flagging & Mapping)" : "LIVE DELETION"), DRY_RUN ? 'INFO' : 'WARNING');
+writeLog("Mode: " . (DRY_RUN ? "DRY-RUN (Flagging & Mapping)" : "LIVE DELETION") . " via " . DRY_RUN_SOURCE, DRY_RUN ? 'INFO' : 'WARNING');
 
 $allRecords = [];
 $startRow = 0;
