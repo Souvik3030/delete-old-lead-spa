@@ -13,6 +13,7 @@ define('SPA_ENTITY_TYPE_ID', 1038);
 // Field Mapping Definitions
 define('SPA_PHONE_FIELD', 'ufCrm8Phone'); 
 define('SPA_EMAIL_FIELD', 'ufCrm8Email'); 
+define('MATCHING_RULE', 'same_normalized_phone_and_same_email');
 
 // Code-level default. Runtime override examples:
 // URL: index.php?dry_run=true   or   index.php?dry_run=false
@@ -194,6 +195,7 @@ function previewRecord($record, $matchedBy = []) {
 writeLog("==========================================================================");
 writeLog("STARTING BULK SCAN: Fetching all records for SPA Entity " . SPA_ENTITY_TYPE_ID);
 writeLog("Mode: " . (DRY_RUN ? "DRY-RUN (Flagging & Mapping)" : "LIVE DELETION") . " via " . DRY_RUN_SOURCE, DRY_RUN ? 'INFO' : 'WARNING');
+writeLog("Matching rule: " . MATCHING_RULE);
 
 $allRecords = [];
 $startRow = 0;
@@ -300,6 +302,7 @@ $deletionPool = array_values($deletionPool);
 // Step 4: Write full diagnostic blueprint to JSON log file
 $outputData = [
     'scan_timestamp' => date('Y-m-d H:i:s'),
+    'matching_rule' => MATCHING_RULE,
     'total_duplicate_groups_found' => count($flaggedMatrix),
     'total_items_slated_for_deletion' => count($deletionPool),
     'duplicate_groups' => $flaggedMatrix
