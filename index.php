@@ -15,14 +15,19 @@ define('SPA_PHONE_FIELD', 'ufCrm8Phone');
 define('SPA_EMAIL_FIELD', 'ufCrm8Email'); 
 
 // Execution Mode Safeguard Toggle (Set to false for live automatic deletions)
-define('DRY_RUN', true); 
+define('DRY_RUN', false); 
 
 // Filesystem Output Destinations
 define('ACTIVITY_LOG_FILE', __DIR__ . '/dedup_activity.log');
 define('JSON_PREVIEW_FILE', __DIR__ . '/b24_dedup_test_log.json');
 
-// Dynamic ID capture from Bitrix24 Outbound Webhook payload
-$entityIdFromWebhook = $_POST['data']['FIELDS']['ID'] ?? null;
+// Dynamic ID capture: Multi-tiered fallback catching SPA payloads and explicit URL parameters
+$entityIdFromWebhook = $_POST['data']['id'] 
+                       ?? $_POST['data']['FIELDS']['ID'] 
+                       ?? $_POST['id'] 
+                       ?? $_GET['id'] 
+                       ?? null;
+                       
 define('TARGET_SPA_ID', (int)$entityIdFromWebhook); 
 
 // ==========================================================================
@@ -107,7 +112,7 @@ writeLog("Target Match Profile -> Normalized Phone Target: '$normSpaPhone' AND E
 writeLog("Step 1: Querying database for strict matching SPA items...");
 $rawCandidatePool = [];
 
-// UPDATED: Forced strict 'AND' database logic assignment 
+// Strict 'AND' database logic assignment 
 $filterAND = [
     'LOGIC' => 'AND',
     '=' . SPA_PHONE_FIELD => $spaPhone,
@@ -148,7 +153,7 @@ foreach ($rawCandidatePool as $id => $item) {
     $hasPhoneMatch = (!empty($normSpaPhone) && $itemPhone === $normSpaPhone);
     $hasEmailMatch = (!empty($spaEmail) && $itemEmail === strtolower($spaEmail));
     
-    // UPDATED: Changed from || (OR) to && (AND) for strict validation integrity
+    // Changed from || (OR) to && (AND) for strict validation integrity
     if ($hasPhoneMatch && $hasEmailMatch) {
         $verifiedItems[$id] = [
             'ID'          => $item['ID'],
