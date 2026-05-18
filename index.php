@@ -1,131 +1,37 @@
 <?php
 /**
- * Bitrix24 SPA-to-SPA Deduplication Engine (Strict AND Matching Logic)
- * File Name: index.php
+ * Bitrix24 Bulk SPA Deduplication & Flagging Engine
+ * File Name: bulk_dedup.php
  */
 
 // ==========================================================================
 // 1. GLOBAL SYSTEM CONFIGURATION
 // ==========================================================================
-define('B24_WEBHOOK_URL', 'https://b24-sgn7y5.bitrix24.in/rest/14/kdho27qenzo9pv03/');
+define('B24_WEBHOOK_URL', 'https://b24-sgn7y5.bitrix24.in/rest/14/kdho27qenzo9pv03/'); 
 define('SPA_ENTITY_TYPE_ID', 1038); 
 
 // Field Mapping Definitions
 define('SPA_PHONE_FIELD', 'ufCrm8Phone'); 
 define('SPA_EMAIL_FIELD', 'ufCrm8Email'); 
 
-// CONTROL TOGGLE: Set to true to view flags inside b24_dedup_test_log.json without deleting
+// CONTROL TOGGLE: Set to true to map and preview flags in JSON. Set to false to delete live.
 define('DRY_RUN', true); 
 
 // Filesystem Output Destinations
-define('ACTIVITY_LOG_FILE', __DIR__ . '/dedup_activity.log');
+define('BULK_LOG_FILE', __DIR__ . '/bulk_dedup_activity.log');
 define('JSON_PREVIEW_FILE', __DIR__ . '/b24_dedup_test_log.json');
 
-// ==========================================================================
-// 2. EXTRACTION LAYER (BITRIX24 WEBHOOK / ROBOT PAYLOAD HANDLERS)
-// ==========================================================================
-function getNestedValue($source, $path) {
-    $cursor = $source;
-    foreach ($path as $key) {
-        if (!is_array($cursor) || !array_key_exists($key, $cursor)) {
-            return null;
-        }
-        $cursor = $cursor[$key];
-    }
-    return $cursor;
-}
-
-function normalizeWebhookId($value) {
-    if (is_array($value)) {
-        $value = end($value);
-    }
-
-    $value = trim((string)$value);
-    if ($value === '') {
-        return 0;
-    }
-
-    if (ctype_digit($value)) {
-        return (int)$value;
-    }
-
-    // Handles Bitrix document IDs such as DYNAMIC_1038_123 or CRM_DYNAMIC_1038_123.
-    if (preg_match('/(\d+)$/', $value, $matches)) {
-        return (int)$matches[1];
-    }
-
-    return 0;
-}
-
-function getIncomingPayload() {
-    $payload = $_REQUEST;
-    $rawInputStream = file_get_contents('php://input');
-
-    if ($rawInputStream !== '') {
-        $jsonPayload = json_decode($rawInputStream, true);
-        if (json_last_error() === JSON_ERROR_NONE && is_array($jsonPayload)) {
-            $payload = array_replace_recursive($payload, $jsonPayload);
-        } else {
-            $formPayload = [];
-            parse_str($rawInputStream, $formPayload);
-            if (!empty($formPayload)) {
-                $payload = array_replace_recursive($payload, $formPayload);
-            }
-        }
-    }
-
-    return $payload;
-}
-
-function extractTargetSpaId($payload) {
-    $candidatePaths = [
-        ['data', 'id'],
-        ['data', 'ID'],
-        ['data', 'FIELDS', 'ID'],
-        ['data', 'FIELDS', 'id'],
-        ['FIELDS', 'ID'],
-        ['FIELDS', 'id'],
-        ['item', 'id'],
-        ['item', 'ID'],
-        ['id'],
-        ['ID'],
-        ['entityId'],
-        ['entity_id'],
-        ['ENTITY_ID'],
-        ['document_id'],
-    ];
-
-    foreach ($candidatePaths as $path) {
-        $id = normalizeWebhookId(getNestedValue($payload, $path));
-        if ($id > 0) {
-            return $id;
-        }
-    }
-
-    return 0;
-}
-
-$incomingPayload = getIncomingPayload();
-$entityIdFromWebhook = extractTargetSpaId($incomingPayload);
-
-define('TARGET_SPA_ID', $entityIdFromWebhook); 
-
-// Safeguard: Stop execution if no valid record ID is found
-if (TARGET_SPA_ID <= 0) {
-    writeLog("Engine halted: No valid dynamic SPA ID received from Bitrix24 webhook event payload.", 'INFO');
-    writeLog("Incoming payload keys detected: " . implode(', ', array_keys($incomingPayload)), 'DEBUG');
-    exit(0);
-}
+set_time_limit(0); // Prevent script timeout for large databases
 
 // ==========================================================================
-// 3. CORE UTILITY INFRASTRUCTURE
+// 2. CORE UTILITY INFRASTRUCTURE
 // ==========================================================================
 
 function writeLog($message, $level = 'INFO') {
     $timestamp = date('Y-m-d H:i:s');
     $formattedMessage = "[$timestamp] [$level] $message" . PHP_EOL;
     echo $formattedMessage;
-    file_put_contents(ACTIVITY_LOG_FILE, $formattedMessage, FILE_APPEND);
+    file_put_contents(BULK_LOG_FILE, $formattedMessage, FILE_APPEND);
 }
 
 function callB24($method, $params = []) {
@@ -138,184 +44,202 @@ function callB24($method, $params = []) {
         CURLOPT_POSTFIELDS => http_build_query($params),
     ]);
     $response = curl_exec($ch);
-    // curl_close($ch);
+    curl_close($ch);
     $decoded = json_decode($response, true);
-    return $decoded['result'] ?? null;
+    return $decoded;
 }
 
-function normalizePhone($phone, $keepPlus = false) {
+function normalizePhone($phone) {
     $phone = trim((string)$phone);
-    if ($keepPlus && strpos($phone, '+') === 0) {
+    $keepPlus = (strpos($phone, '+') === 0);
+    if ($keepPlus) {
         return '+' . preg_replace('/[^0-9]/', '', $phone);
     }
     return preg_replace('/[^0-9]/', '', $phone);
 }
 
+function normalizeEmail($email) {
+    return strtolower(trim((string)$email));
+}
+
+function getMatchedBy($source, $candidate) {
+    $matchedBy = [];
+
+    if (!empty($source['NORM_PHONE']) && $source['NORM_PHONE'] === $candidate['NORM_PHONE']) {
+        $matchedBy[] = 'phone';
+    }
+
+    if (!empty($source['EMAIL']) && $source['EMAIL'] === $candidate['EMAIL']) {
+        $matchedBy[] = 'email';
+    }
+
+    return $matchedBy;
+}
+
+function previewRecord($record, $matchedBy = []) {
+    $preview = [
+        'ID'          => $record['ID'],
+        'TITLE'       => $record['TITLE'],
+        'DATE_CREATE' => $record['DATE_CREATE'],
+        'PHONE'       => $record['PHONE'],
+        'EMAIL'       => $record['EMAIL']
+    ];
+
+    if (!empty($matchedBy)) {
+        $preview['matched_by'] = $matchedBy;
+    }
+
+    return $preview;
+}
+
 // ==========================================================================
-// 4. EXECUTION PIPELINE
+// 3. MAIN EXECUTION PIPELINE
 // ==========================================================================
 
 writeLog("==========================================================================");
-writeLog("SCRIPT START: Initializing SPA-to-SPA Deduplication Engine (Strict AND Mode).");
-writeLog("Target Dynamic SPA ID: " . TARGET_SPA_ID);
-writeLog("Execution Mode: " . (DRY_RUN ? "DRY-RUN MODE (Safe Flagging)" : "LIVE MODE (Destructive)"), DRY_RUN ? 'INFO' : 'WARNING');
+writeLog("STARTING BULK SCAN: Fetching all records for SPA Entity " . SPA_ENTITY_TYPE_ID);
+writeLog("Mode: " . (DRY_RUN ? "DRY-RUN (Flagging & Mapping)" : "LIVE DELETION"), DRY_RUN ? 'INFO' : 'WARNING');
 
-// Fetch the Context of the Incoming Source SPA Item
-$spaItem = callB24('crm.item.get', [
-    'entityTypeId' => SPA_ENTITY_TYPE_ID,
-    'id'           => TARGET_SPA_ID
-]);
+$allRecords = [];
+$startRow = 0;
 
-if (!$spaItem || !isset($spaItem['item'])) {
-    writeLog("Critical Failure: Source SPA Item ID " . TARGET_SPA_ID . " could not be found inside CRM.", 'CRITICAL');
-    exit(1);
-}
+// Step 1: Batch-fetch every single record in the SPA database (handling Bitrix24's 50-item limit)
+do {
+    writeLog("Fetching batch starting at row offset: $startRow...");
+    $response = callB24('crm.item.list', [
+        'entityTypeId' => SPA_ENTITY_TYPE_ID,
+        'select'       => ['ID', 'TITLE', 'DATE_CREATE', SPA_PHONE_FIELD, SPA_EMAIL_FIELD],
+        'start'        => $startRow
+    ]);
 
-$spaPhone = trim((string)($spaItem['item'][SPA_PHONE_FIELD] ?? ''));
-$spaEmail = trim((string)($spaItem['item'][SPA_EMAIL_FIELD] ?? ''));
-
-// Safeguard: Ensure both verification criteria values exist on the parent record
-if (empty($spaPhone) || empty($spaEmail)) {
-    writeLog("Aborting Pipeline: Both Phone AND Email fields must be populated on the parent record to evaluate strict matches.", 'INFO');
-    exit(0);
-}
-
-$hasPlusInSource = (strpos($spaPhone, '+') === 0);
-$normSpaPhone = normalizePhone($spaPhone, $hasPlusInSource);
-writeLog("Target Profile -> Phone: '$normSpaPhone' AND Email: '$spaEmail'");
-
-// PHASE 1: Collect Candidate SPA items using a strict structural database filter
-writeLog("Step 1: Querying database for records matching BOTH targets...");
-$rawCandidatePool = [];
-
-$filterAND = [
-    'LOGIC' => 'AND',
-    '=' . SPA_PHONE_FIELD => $spaPhone,
-    '=' . SPA_EMAIL_FIELD => $spaEmail
-];
-
-$spaList = callB24('crm.item.list', [
-    'entityTypeId' => SPA_ENTITY_TYPE_ID,
-    'filter'       => $filterAND,
-    'select'       => ['ID', 'TITLE', 'DATE_CREATE', SPA_PHONE_FIELD, SPA_EMAIL_FIELD]
-]);
-
-if (is_array($spaList) && isset($spaList['items'])) {
-    foreach ($spaList['items'] as $item) {
-        $rawCandidatePool[$item['id']] = [
-            'ID'          => $item['id'],
-            'TITLE'       => $item['title'] ?? 'SPA Item',
-            'DATE_CREATE' => $item['dateCreate'] ?? '',
-            'PHONE'       => trim((string)($item[SPA_PHONE_FIELD] ?? '')),
-            'EMAIL'       => trim((string)($item[SPA_EMAIL_FIELD] ?? ''))
-        ];
+    if (!isset($response['result']['items']) || !is_array($response['result']['items'])) {
+        writeLog("Failed to fetch data or reached the end of records.", 'ERROR');
+        break;
     }
-}
 
-// PHASE 2: Deep Extraction & Re-Verification
-writeLog("Step 2: Processing verification filtering on " . count($rawCandidatePool) . " items...");
-$verifiedItems = [];
+    foreach ($response['result']['items'] as $item) {
+        $phone = trim((string)($item[SPA_PHONE_FIELD] ?? ''));
+        $email = strtolower(trim((string)($item[SPA_EMAIL_FIELD] ?? '')));
 
-foreach ($rawCandidatePool as $id => $item) {
-    // Automatically skip processing the item that triggered this run
-    if ((int)$id === TARGET_SPA_ID) {
+        // Track any usable SPA source. A record can match by phone, email, or both.
+        if (!empty($phone) || !empty($email)) {
+            $allRecords[] = [
+                'ID'          => (int)$item['id'],
+                'TITLE'       => $item['title'] ?? 'Untitled SPA',
+                'DATE_CREATE' => $item['dateCreate'] ?? '',
+                'PHONE'       => $phone,
+                'NORM_PHONE'  => normalizePhone($phone),
+                'EMAIL'       => normalizeEmail($email)
+            ];
+        }
+    }
+
+    $startRow = $response['next'] ?? null;
+} while ($startRow !== null);
+
+writeLog("Total valid records with usable Phone OR Email fetched: " . count($allRecords));
+
+// Step 2: Fully automated source-by-source matching across the entire SPA.
+$flaggedMatrix = [];
+$deletionPool = [];
+$processedIds = [];
+
+foreach ($allRecords as $source) {
+    if (isset($processedIds[$source['ID']])) {
         continue;
     }
 
-    $itemPhone = normalizePhone($item['PHONE'], $hasPlusInSource);
-    $itemEmail = strtolower($item['EMAIL']);
-    
-    $hasPhoneMatch = (!empty($normSpaPhone) && $itemPhone === $normSpaPhone);
-    $hasEmailMatch = (!empty($spaEmail) && $itemEmail === strtolower($spaEmail));
-    
-    // Strict comparison check: Both must evaluate to true
-    if ($hasPhoneMatch && $hasEmailMatch) {
-        $verifiedItems[$id] = [
-            'ID'          => $item['ID'],
-            'TITLE'       => $item['TITLE'],
-            'DATE_CREATE' => $item['DATE_CREATE'],
-            'EXTRACTED_DATA' => [
-                'phone' => $item['PHONE'],
-                'email' => $item['EMAIL']
-            ]
-        ];
-        writeLog("--> PASSED FLAG: SPA Item #$id matches both parameters.", 'SUCCESS');
-    } else {
-        writeLog("--> REJECTED: SPA Item #$id failed compound matching checks.", 'WARNING');
-    }
-}
+    writeLog("Scanning source SPA item #{$source['ID']} against entire SPA...");
 
-// PHASE 3: Determine Duplication Conflict Arrays
-$totalVerifiedCount = count($verifiedItems);
-writeLog("Total background records verified as true duplicates: $totalVerifiedCount");
+    $cluster = [$source];
+    $matchDetails = [
+        $source['ID'] => []
+    ];
 
-if ($totalVerifiedCount < 1) {
-    writeLog("Clean finish: No concurrent duplicates found inside database topology.", 'SUCCESS');
-    exit(0);
-}
+    foreach ($allRecords as $candidate) {
+        if ($candidate['ID'] === $source['ID'] || isset($processedIds[$candidate['ID']])) {
+            continue;
+        }
 
-// Include the current incoming record into the pool to correctly sort historical data
-$verifiedItems[TARGET_SPA_ID] = [
-    'ID'          => (string)TARGET_SPA_ID,
-    'TITLE'       => $spaItem['item']['title'] ?? 'Incoming SPA',
-    'DATE_CREATE' => $spaItem['item']['dateCreate'] ?? date('c'),
-    'EXTRACTED_DATA' => ['phone' => $spaPhone, 'email' => $spaEmail]
-];
-
-// Sort descending by ID value (Newest items populate at the top of the list)
-uasort($verifiedItems, function($a, $b) {
-    return (int)$b['ID'] - (int)$a['ID'];
-});
-
-$latestItem = array_shift($verifiedItems);
-$itemsToDelete = $verifiedItems;
-
-writeLog("RETAINED WINNER (Newest Record): ID #{$latestItem['ID']} - '{$latestItem['TITLE']}'", 'SUCCESS');
-writeLog("FLAGGED FOR DISPOSAL (Older Records): " . count($itemsToDelete) . " items inside cluster.", 'WARNING');
-
-// PHASE 4: Write Audit File & Delete Target Data Matrix
-$logData = [
-    'timestamp' => date('Y-m-d H:i:s'),
-    'incoming_trigger_id' => TARGET_SPA_ID,
-    'kept_item' => $latestItem,
-    'flagged_for_deletion' => array_values($itemsToDelete)
-];
-
-file_put_contents(JSON_PREVIEW_FILE, json_encode($logData, JSON_PRETTY_PRINT));
-
-if (!DRY_RUN) {
-    writeLog("CRITICAL WARNING: Dry run disabled. Executing permanent deletion loops.", 'WARNING');
-    foreach ($itemsToDelete as $item) {
-        $realB24Id = $item['ID'];
-        writeLog("Firing deletion on duplicate SPA Item ID #$realB24Id ('{$item['TITLE']}')");
-        
-        $url = rtrim(B24_WEBHOOK_URL, '/') . '/crm.item.delete.json';
-        $ch = curl_init();
-        curl_setopt_array($ch, [
-            CURLOPT_URL => $url,
-            CURLOPT_RETURNTRANSFER => true,
-            CURLOPT_POST => true,
-            CURLOPT_POSTFIELDS => http_build_query([
-                'entityTypeId' => SPA_ENTITY_TYPE_ID,
-                'id'           => $realB24Id
-            ]),
-        ]);
-        $response = curl_exec($ch);
-        // curl_close($ch);
-        
-        $rawResult = json_decode($response, true);
-        
-        if (isset($rawResult['result'])) {
-            writeLog("Successfully removed duplicate SPA Item ID #$realB24Id.", 'SUCCESS');
-        } else {
-            $apiError = $rawResult['error_description'] ?? $rawResult['error'] ?? 'Unknown API block';
-            writeLog("Failure on SPA Item ID #$realB24Id: " . $apiError, 'ERROR');
+        $matchedBy = getMatchedBy($source, $candidate);
+        if (!empty($matchedBy)) {
+            $cluster[] = $candidate;
+            $matchDetails[$candidate['ID']] = $matchedBy;
         }
     }
-    writeLog("Data purge phase concluded.", 'SUCCESS');
-} else {
-    writeLog("[DRY RUN ACTIVE]: Operations simulated. Review your flagged targets inside: " . JSON_PREVIEW_FILE, 'INFO');
+
+    if (count($cluster) <= 1) {
+        $processedIds[$source['ID']] = true;
+        continue;
+    }
+
+    // Sort cluster descending by ID. Newest record ends up at index 0.
+    usort($cluster, function($a, $b) {
+        return $b['ID'] - $a['ID'];
+    });
+
+    $winner = array_shift($cluster);
+    $duplicates = $cluster;
+
+    $flaggedMatrix[] = [
+        'source_spa_item' => previewRecord($source),
+        'matching_profile' => [
+            'normalized_phone' => $source['NORM_PHONE'],
+            'email'            => $source['EMAIL']
+        ],
+        'count' => count($duplicates) + 1,
+        'kept_winner' => previewRecord($winner, $matchDetails[$winner['ID']] ?? []),
+        'duplicates_flagged' => array_map(function($d) use ($matchDetails) {
+            return previewRecord($d, $matchDetails[$d['ID']] ?? []);
+        }, $duplicates)
+    ];
+
+    $processedIds[$source['ID']] = true;
+    $processedIds[$winner['ID']] = true;
+
+    foreach ($duplicates as $dup) {
+        $processedIds[$dup['ID']] = true;
+        $deletionPool[$dup['ID']] = $dup['ID'];
+    }
 }
 
-writeLog("SCRIPT EXECUTION COMPLETED.");
+$deletionPool = array_values($deletionPool);
+
+// Step 4: Write full diagnostic blueprint to JSON log file
+$outputData = [
+    'scan_timestamp' => date('Y-m-d H:i:s'),
+    'total_duplicate_groups_found' => count($flaggedMatrix),
+    'total_items_slated_for_deletion' => count($deletionPool),
+    'duplicate_groups' => $flaggedMatrix
+];
+
+file_put_contents(JSON_PREVIEW_FILE, json_encode($outputData, JSON_PRETTY_PRINT));
+writeLog("Deduplication matrix mapped completely. Output written to: " . JSON_PREVIEW_FILE);
+writeLog("Total duplicate records detected across entire database: " . count($deletionPool));
+
+// Step 5: Live Destruction (Only triggers if DRY_RUN is false)
+if (!DRY_RUN && count($deletionPool) > 0) {
+    writeLog("DRY_RUN IS FALSE: Commencing bulk production database cleanup...", 'WARNING');
+    
+    foreach ($deletionPool as $deleteId) {
+        writeLog("Deleting duplicate SPA item ID #$deleteId...");
+        $delResponse = callB24('crm.item.delete', [
+            'entityTypeId' => SPA_ENTITY_TYPE_ID,
+            'id'           => $deleteId
+        ]);
+
+        if (isset($delResponse['result'])) {
+            writeLog("Successfully removed duplicate ID #$deleteId.", 'SUCCESS');
+        } else {
+            $err = $delResponse['error_description'] ?? 'API Rejection';
+            writeLog("Failed to delete ID #$deleteId: $err", 'ERROR');
+        }
+        usleep(100000); // 100ms throttle pause to prevent hitting Bitrix24 call volume ceilings
+    }
+    writeLog("Bulk database purge completed.", 'SUCCESS');
+} else {
+    writeLog("[DRY RUN ACTIVE]: No data was deleted. Safely inspect " . JSON_PREVIEW_FILE . " to see the full list of flagged duplicates.");
+}
+
+writeLog("BULK EXECUTION ENGINE FINISHED.");
 writeLog("==========================================================================");
