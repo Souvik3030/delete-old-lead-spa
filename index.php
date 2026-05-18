@@ -4,26 +4,30 @@
  */
 
 // 1. CONFIGURATION
-define('B24_WEBHOOK_URL', 'https://b24-sgn7y5.bitrix24.in/rest/14/kdho27qenzo9pv03/'); 
-define('SPA_ENTITY_TYPE_ID', 1038); 
-define('TARGET_SPA_ID', 2);         
+define('B24_WEBHOOK_URL', 'https://b24-sgn7y5.bitrix24.in/rest/14/kdho27qenzo9pv03/');
+define('SPA_ENTITY_TYPE_ID', 1038);
+define('TARGET_SPA_ID', 2);
 
-define('SPA_PHONE_FIELD', 'ufCrm8Phone'); 
-define('SPA_EMAIL_FIELD', 'ufCrm8Email'); 
+define('SPA_PHONE_FIELD', 'ufCrm8Phone');
+define('SPA_EMAIL_FIELD', 'ufCrm8Email');
 
-define('DRY_RUN', true); 
+// true for dry run 
+// false for real deletion
+define('DRY_RUN', false);
 
 define('ACTIVITY_LOG_FILE', __DIR__ . '/dedup_activity.log');
 define('JSON_PREVIEW_FILE', __DIR__ . '/b24_dedup_test_log.json');
 
-function writeLog($message, $level = 'INFO') {
+function writeLog($message, $level = 'INFO')
+{
     $timestamp = date('Y-m-d H:i:s');
     $formattedMessage = "[$timestamp] [$level] $message" . PHP_EOL;
     echo $formattedMessage;
     file_put_contents(ACTIVITY_LOG_FILE, $formattedMessage, FILE_APPEND);
 }
 
-function callB24($method, $params = []) {
+function callB24($method, $params = [])
+{
     $url = rtrim(B24_WEBHOOK_URL, '/') . '/' . $method . '.json';
     $ch = curl_init();
     curl_setopt_array($ch, [
@@ -33,7 +37,7 @@ function callB24($method, $params = []) {
         CURLOPT_POSTFIELDS => http_build_query($params),
     ]);
     $response = curl_exec($ch);
-    curl_close($ch);
+    //curl_close($ch);
     $decoded = json_decode($response, true);
     return $decoded['result'] ?? null;
 }
@@ -42,8 +46,9 @@ function callB24($method, $params = []) {
  * Normalizes phone numbers dynamically based on whether the source number uses a '+' prefix.
  * Strips out presentation noise (spaces, hyphens, brackets).
  */
-function normalizePhone($phone, $keepPlus = false) {
-    $phone = trim((string)$phone);
+function normalizePhone($phone, $keepPlus = false)
+{
+    $phone = trim((string) $phone);
     if ($keepPlus && strpos($phone, '+') === 0) {
         // Keep the leading '+' sign, strip everything else except digits
         return '+' . preg_replace('/[^0-9]/', '', $phone);
@@ -52,12 +57,13 @@ function normalizePhone($phone, $keepPlus = false) {
     return preg_replace('/[^0-9]/', '', $phone);
 }
 
-function extractMultiFields($fieldArray) {
+function extractMultiFields($fieldArray)
+{
     $values = [];
     if (is_array($fieldArray)) {
         foreach ($fieldArray as $item) {
             if (!empty($item['VALUE'])) {
-                $values[] = trim((string)$item['VALUE']);
+                $values[] = trim((string) $item['VALUE']);
             }
         }
     }
@@ -72,7 +78,7 @@ writeLog("SCRIPT START: Initializing Lead Deduplication Engine with Strict Forma
 
 $spaItem = callB24('crm.item.get', [
     'entityTypeId' => SPA_ENTITY_TYPE_ID,
-    'id'           => TARGET_SPA_ID
+    'id' => TARGET_SPA_ID
 ]);
 
 if (!$spaItem || !isset($spaItem['item'])) {
@@ -80,8 +86,8 @@ if (!$spaItem || !isset($spaItem['item'])) {
     exit(1);
 }
 
-$spaPhone = trim((string)($spaItem['item'][SPA_PHONE_FIELD] ?? ''));
-$spaEmail = trim((string)($spaItem['item'][SPA_EMAIL_FIELD] ?? ''));
+$spaPhone = trim((string) ($spaItem['item'][SPA_PHONE_FIELD] ?? ''));
+$spaEmail = trim((string) ($spaItem['item'][SPA_EMAIL_FIELD] ?? ''));
 
 if (empty($spaPhone) && empty($spaEmail)) {
     writeLog("Aborting: SPA source data fields are completely empty.", 'CRITICAL');
@@ -101,8 +107,10 @@ $rawCandidatePool = [];
 
 // Base search filters (We use raw values here because Bitrix24's lead.list partial search handles characters automatically)
 $filterOR = ['LOGIC' => 'OR'];
-if (!empty($spaPhone)) $filterOR[] = ['=PHONE' => $spaPhone];
-if (!empty($spaEmail)) $filterOR[] = ['=EMAIL' => $spaEmail];
+if (!empty($spaPhone))
+    $filterOR[] = ['=PHONE' => $spaPhone];
+if (!empty($spaEmail))
+    $filterOR[] = ['=EMAIL' => $spaEmail];
 
 // STEP 1: Direct Leads Fetch
 writeLog("Step 1: Fetching background direct matching leads.");
@@ -144,34 +152,34 @@ $verifiedLeads = [];
 
 foreach ($rawCandidatePool as $id => $lead) {
     writeLog("Deep inspecting Lead ID #$id...", 'DEBUG');
-    
+
     $fullLead = callB24('crm.lead.get', ['id' => $id]);
     $leadPhones = extractMultiFields($fullLead['PHONE'] ?? null);
     $leadEmails = extractMultiFields($fullLead['EMAIL'] ?? null);
-    
+
     $contactPhones = [];
     $contactEmails = [];
-    
-    if (!empty($lead['CONTACT_ID']) && (int)$lead['CONTACT_ID'] > 0) {
+
+    if (!empty($lead['CONTACT_ID']) && (int) $lead['CONTACT_ID'] > 0) {
         $fullContact = callB24('crm.contact.get', ['id' => $lead['CONTACT_ID']]);
         if ($fullContact) {
             $contactPhones = extractMultiFields($fullContact['PHONE'] ?? null);
             $contactEmails = extractMultiFields($fullContact['EMAIL'] ?? null);
         }
     }
-    
+
     // Normalize candidates strictly following the rule set by the SPA source data
     $allAssociatedPhones = [];
     foreach (array_merge($leadPhones, $contactPhones) as $rawPhoneNum) {
         $allAssociatedPhones[] = normalizePhone($rawPhoneNum, $hasPlusInSource);
     }
-    
+
     $allAssociatedEmails = array_map('strtolower', array_merge($leadEmails, $contactEmails));
-    
+
     // EXECUTE COMPARISON
     $hasPhoneMatch = (!empty($normSpaPhone) && in_array($normSpaPhone, $allAssociatedPhones, true));
     $hasEmailMatch = (!empty($spaEmail) && in_array(strtolower($spaEmail), $allAssociatedEmails, true));
-    
+
     if ($hasPhoneMatch || $hasEmailMatch) {
         $verifiedLeads[$id] = [
             'ID' => $lead['ID'],
@@ -202,8 +210,8 @@ if ($totalVerifiedCount <= 1) {
     exit(0);
 }
 
-uasort($verifiedLeads, function($a, $b) {
-    return (int)$b['ID'] - (int)$a['ID'];
+uasort($verifiedLeads, function ($a, $b) {
+    return (int) $b['ID'] - (int) $a['ID'];
 });
 
 $latestLead = array_shift($verifiedLeads);
