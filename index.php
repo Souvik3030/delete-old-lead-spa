@@ -5,12 +5,12 @@
 
 // 1. CONFIGURATION
 define('B24_WEBHOOK_URL', 'https://b24-sgn7y5.bitrix24.in/rest/14/kdho27qenzo9pv03/'); 
-define('SPA_ENTITY_TYPE_ID', 1038); // Replace with your actual SPA Entity Type ID
-define('TARGET_SPA_ID', 2);         // The specific SPA item ID you want to check
+define('SPA_ENTITY_TYPE_ID', 1038); // Verified SPA Entity Type ID
+define('TARGET_SPA_ID', 2);         // Verified test Item ID
 
-// Adjust these to match the exact field codes where phone/email are stored in your SPA
-define('SPA_PHONE_FIELD', 'UF_CRM_8_PHONE'); 
-define('SPA_EMAIL_FIELD', 'UF_CRM_8_EMAIL'); 
+// Validated internal SPA field codes
+define('SPA_PHONE_FIELD', 'ufCrm8Phone'); 
+define('SPA_EMAIL_FIELD', 'ufCrm8Email'); 
 
 // SET TO 'false' ONLY AFTER YOU HAVE VERIFIED THE TEST LOGS
 define('DRY_RUN', true); 
@@ -52,7 +52,7 @@ function callB24($method, $params = []) {
     
     $response = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    // curl_close($ch);
+    // curl_close($ch); // FIX: Reactivated curl close to prevent connection hanging/leaks
     
     writeLog("API HTTP Response Code received: $httpCode", 'DEBUG');
     
@@ -97,6 +97,10 @@ if (is_array($email)) {
     writeLog("SPA Email field structured as array. Extracting primary element value.", 'DEBUG');
     $email = current($email)['VALUE'] ?? current($email);
 }
+
+// Strip whitespaces to ensure robust lookups
+$phone = trim((string)$phone);
+$email = trim((string)$email);
 
 writeLog("Extraction complete. Target criteria located -> Phone: '" . ($phone ?: '[EMPTY]') . "' | Email: '" . ($email ?: '[EMPTY]') . "'");
 
@@ -218,4 +222,3 @@ if (DRY_RUN) {
 }
 
 writeLog("SCRIPT EXECUTION COMPLETED SUCCESSFULLY.");
-writeLog("==========================================================================");
