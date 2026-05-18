@@ -112,6 +112,7 @@ function resolveDryRunFlag($defaultValue) {
 
 function normalizePhone($phone) {
     // Keep a leading '+' when present and keep every digit so country codes remain part of the comparison.
+    // Examples: +91 9876543210 => +919876543210, (+971) 501234567 => +971501234567.
     $phone = trim((string)$phone);
     $normalized = preg_replace('/[^0-9]/', '', $phone);
 
@@ -181,13 +182,13 @@ function compareNewestRecords($a, $b) {
 
 function previewRecord($record, $matchedBy = []) {
     $preview = [
-        'ID'              => $record['ID'],
-        'TITLE'           => $record['TITLE'],
-        'DATE_CREATE'     => $record['DATE_CREATE'],
-        'PHONE'           => $record['PHONE'],
+        'ID'          => $record['ID'],
+        'TITLE'       => $record['TITLE'],
+        'DATE_CREATE' => $record['DATE_CREATE'],
+        'PHONE'       => $record['PHONE'],
         'NORMALIZED_PHONE' => $record['NORM_PHONE'] ?? normalizePhone($record['PHONE']),
         'PHONE_MATCH_KEY' => $record['PHONE_MATCH_KEY'] ?? getPhoneMatchKey($record['PHONE']),
-        'EMAIL'           => $record['EMAIL']
+        'EMAIL'       => $record['EMAIL']
     ];
 
     if (!empty($matchedBy)) {
@@ -202,22 +203,19 @@ function previewRecord($record, $matchedBy = []) {
 // ==========================================================================
 
 writeLog("==========================================================================");
-writeLog("STARTING BULK SCAN: Fetching records for SPA Entity " . SPA_ENTITY_TYPE_ID . " (Stage: Start)");
+writeLog("STARTING BULK SCAN: Fetching all records for SPA Entity " . SPA_ENTITY_TYPE_ID);
 writeLog("Mode: " . (DRY_RUN ? "DRY-RUN (Flagging & Mapping)" : "LIVE DELETION") . " via " . DRY_RUN_SOURCE, DRY_RUN ? 'INFO' : 'WARNING');
 writeLog("Matching rule: " . MATCHING_RULE);
 
 $allRecords = [];
 $startRow = 0;
 
-// Step 1: Batch-fetch records locked only to the 'Start' stage (handling Bitrix24's 50-item limit)
+// Step 1: Batch-fetch every single record in the SPA database (handling Bitrix24's 50-item limit)
 do {
     writeLog("Fetching batch starting at row offset: $startRow...");
     $response = callB24('crm.item.list', [
         'entityTypeId' => SPA_ENTITY_TYPE_ID,
         'select'       => ['ID', 'TITLE', 'DATE_CREATE', SPA_PHONE_FIELD, SPA_EMAIL_FIELD],
-        'filter'       => [
-            '=stageId' => 'DT1038_14:NEW' // Exact Stage ID confirmed via crm.status.list
-        ],
         'start'        => $startRow
     ]);
 
@@ -230,15 +228,16 @@ do {
         $phone = trim((string)($item[SPA_PHONE_FIELD] ?? ''));
         $email = strtolower(trim((string)($item[SPA_EMAIL_FIELD] ?? '')));
 
+        // Track phone profiles. Email stays in the output, but matching is phone-only.
         if (!empty($phone)) {
             $allRecords[] = [
-                'ID'              => (int)$item['id'],
-                'TITLE'           => $item['title'] ?? 'Untitled SPA',
-                'DATE_CREATE'     => $item['dateCreate'] ?? '',
-                'PHONE'           => $phone,
-                'NORM_PHONE'      => normalizePhone($phone),
+                'ID'          => (int)$item['id'],
+                'TITLE'       => $item['title'] ?? 'Untitled SPA',
+                'DATE_CREATE' => $item['dateCreate'] ?? '',
+                'PHONE'       => $phone,
+                'NORM_PHONE'  => normalizePhone($phone),
                 'PHONE_MATCH_KEY' => getPhoneMatchKey($phone),
-                'EMAIL'           => normalizeEmail($email)
+                'EMAIL'       => normalizeEmail($email)
             ];
         }
     }
@@ -246,9 +245,9 @@ do {
     $startRow = $response['next'] ?? null;
 } while ($startRow !== null);
 
-writeLog("Total valid records with usable Phone fetched in 'Start' stage: " . count($allRecords));
+writeLog("Total valid records with usable Phone fetched: " . count($allRecords));
 
-// Step 2: Fully automated source-by-source matching across the filtered dataset.
+// Step 2: Fully automated source-by-source matching across the entire SPA.
 $flaggedMatrix = [];
 $deletionPool = [];
 $processedIds = [];
@@ -258,7 +257,7 @@ foreach ($allRecords as $source) {
         continue;
     }
 
-    writeLog("Scanning source SPA item #{$source['ID']} against 'Start' dataset...");
+    writeLog("Scanning source SPA item #{$source['ID']} against entire SPA...");
 
     $cluster = [$source];
     $matchDetails = [
@@ -323,7 +322,7 @@ $outputData = [
 
 file_put_contents(JSON_PREVIEW_FILE, json_encode($outputData, JSON_PRETTY_PRINT));
 writeLog("Deduplication matrix mapped completely. Output written to: " . JSON_PREVIEW_FILE);
-writeLog("Total duplicate records detected within 'Start' stage: " . count($deletionPool));
+writeLog("Total duplicate records detected across entire database: " . count($deletionPool));
 
 // Step 5: Live Destruction (Only triggers if DRY_RUN is false)
 if (!DRY_RUN && count($deletionPool) > 0) {
