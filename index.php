@@ -14,25 +14,37 @@ define('SPA_ENTITY_TYPE_ID', 1038);
 define('SPA_PHONE_FIELD', 'ufCrm8Phone'); 
 define('SPA_EMAIL_FIELD', 'ufCrm8Email'); 
 
-// Execution Mode Safeguard Toggle (Set to false for live automatic deletions)
-define('DRY_RUN', false); 
+// CONTROL TOGGLE: Set to true to view flags inside b24_dedup_test_log.json without deleting
+define('DRY_RUN', true); 
 
 // Filesystem Output Destinations
 define('ACTIVITY_LOG_FILE', __DIR__ . '/dedup_activity.log');
 define('JSON_PREVIEW_FILE', __DIR__ . '/b24_dedup_test_log.json');
 
-// Dynamic ID capture: Multi-tiered fallback catching SPA payloads and explicit URL parameters
+// ==========================================================================
+// 2. EXTRACTION LAYER (FIX FOR APPLICATION/JSON & GET HANDLERS)
+// ==========================================================================
 $entityIdFromWebhook = $_POST['data']['id'] 
                        ?? $_POST['data']['FIELDS']['ID'] 
                        ?? $_POST['id'] 
                        ?? $_GET['id'] 
                        ?? null;
-                       
+
+// Fallback: Parse raw payload input stream if standard post arrays turn up empty
+if (empty($entityIdFromWebhook)) {
+    $rawInputStream = file_get_contents('php://input');
+    if (!empty($rawInputStream)) {
+        $parsedJson = json_decode($rawInputStream, true);
+        $entityIdFromWebhook = $parsedJson['data']['id'] 
+                               ?? $parsedJson['data']['FIELDS']['ID'] 
+                               ?? $parsedJson['id'] 
+                               ?? null;
+    }
+}
+
 define('TARGET_SPA_ID', (int)$entityIdFromWebhook); 
 
-// ==========================================================================
-// 2. AUTOMATION INTERRUPT SAFEGUARD
-// ==========================================================================
+// Safeguard: Stop execution if no valid record ID is found
 if (TARGET_SPA_ID <= 0) {
     writeLog("Engine halted: No valid dynamic SPA ID received from Bitrix24 webhook event payload.", 'INFO');
     exit(0);
@@ -79,7 +91,7 @@ function normalizePhone($phone, $keepPlus = false) {
 writeLog("==========================================================================");
 writeLog("SCRIPT START: Initializing SPA-to-SPA Deduplication Engine (Strict AND Mode).");
 writeLog("Target Dynamic SPA ID: " . TARGET_SPA_ID);
-writeLog("Execution Mode: " . (DRY_RUN ? "DRY-RUN MODE (Safe)" : "LIVE MODE (Destructive)"), DRY_RUN ? 'INFO' : 'WARNING');
+writeLog("Execution Mode: " . (DRY_RUN ? "DRY-RUN MODE (Safe Flagging)" : "LIVE MODE (Destructive)"), DRY_RUN ? 'INFO' : 'WARNING');
 
 // Fetch the Context of the Incoming Source SPA Item
 $spaItem = callB24('crm.item.get', [
@@ -95,24 +107,20 @@ if (!$spaItem || !isset($spaItem['item'])) {
 $spaPhone = trim((string)($spaItem['item'][SPA_PHONE_FIELD] ?? ''));
 $spaEmail = trim((string)($spaItem['item'][SPA_EMAIL_FIELD] ?? ''));
 
-// CRITICAL SAFEGUARD: Both fields must be populated in the incoming item to execute AND logic
+// Safeguard: Ensure both verification criteria values exist on the parent record
 if (empty($spaPhone) || empty($spaEmail)) {
-    writeLog("Aborting Pipeline: Both Phone AND Email must be present on the incoming record to process strict matches.", 'INFO');
+    writeLog("Aborting Pipeline: Both Phone AND Email fields must be populated on the parent record to evaluate strict matches.", 'INFO');
     exit(0);
 }
 
-// Evaluate structural prefix rule definitions
 $hasPlusInSource = (strpos($spaPhone, '+') === 0);
-writeLog("Format Check: Source phone prefix '+' " . ($hasPlusInSource ? "DETECTED." : "NOT detected."));
-
 $normSpaPhone = normalizePhone($spaPhone, $hasPlusInSource);
-writeLog("Target Match Profile -> Normalized Phone Target: '$normSpaPhone' AND Email Target: '$spaEmail'");
+writeLog("Target Profile -> Phone: '$normSpaPhone' AND Email: '$spaEmail'");
 
-// PHASE 1: Collect Candidate SPA items matching criteria fields via Bitrix24 AND Engine
-writeLog("Step 1: Querying database for strict matching SPA items...");
+// PHASE 1: Collect Candidate SPA items using a strict structural database filter
+writeLog("Step 1: Querying database for records matching BOTH targets...");
 $rawCandidatePool = [];
 
-// Strict 'AND' database logic assignment 
 $filterAND = [
     'LOGIC' => 'AND',
     '=' . SPA_PHONE_FIELD => $spaPhone,
@@ -137,12 +145,12 @@ if (is_array($spaList) && isset($spaList['items'])) {
     }
 }
 
-// PHASE 2: Strict Field-Level Extraction and Format Verification
-writeLog("Step 2: Beginning deep validation on " . count($rawCandidatePool) . " collected candidates...");
+// PHASE 2: Deep Extraction & Re-Verification
+writeLog("Step 2: Processing verification filtering on " . count($rawCandidatePool) . " items...");
 $verifiedItems = [];
 
 foreach ($rawCandidatePool as $id => $item) {
-    // Drop the triggering record out of the processing pool
+    // Automatically skip processing the item that triggered this run
     if ((int)$id === TARGET_SPA_ID) {
         continue;
     }
@@ -153,7 +161,7 @@ foreach ($rawCandidatePool as $id => $item) {
     $hasPhoneMatch = (!empty($normSpaPhone) && $itemPhone === $normSpaPhone);
     $hasEmailMatch = (!empty($spaEmail) && $itemEmail === strtolower($spaEmail));
     
-    // Changed from || (OR) to && (AND) for strict validation integrity
+    // Strict comparison check: Both must evaluate to true
     if ($hasPhoneMatch && $hasEmailMatch) {
         $verifiedItems[$id] = [
             'ID'          => $item['ID'],
@@ -164,22 +172,30 @@ foreach ($rawCandidatePool as $id => $item) {
                 'email' => $item['EMAIL']
             ]
         ];
-        writeLog("--> PASSED: SPA Item #$id matches BOTH phone and email confirmation targets.", 'SUCCESS');
+        writeLog("--> PASSED FLAG: SPA Item #$id matches both parameters.", 'SUCCESS');
     } else {
-        writeLog("--> REJECTED: SPA Item #$id failed compound verification. Saved from deletion.", 'WARNING');
+        writeLog("--> REJECTED: SPA Item #$id failed compound matching checks.", 'WARNING');
     }
 }
 
-// PHASE 3: Chronological Sorting Logic
+// PHASE 3: Determine Duplication Conflict Arrays
 $totalVerifiedCount = count($verifiedItems);
-writeLog("Total verified matching SPA items remaining after validation: $totalVerifiedCount");
+writeLog("Total background records verified as true duplicates: $totalVerifiedCount");
 
-if ($totalVerifiedCount <= 1) {
-    writeLog("Clean execution completed. No duplicate records verified in the system.", 'SUCCESS');
+if ($totalVerifiedCount < 1) {
+    writeLog("Clean finish: No concurrent duplicates found inside database topology.", 'SUCCESS');
     exit(0);
 }
 
-// Sort items by ID descending to isolate the newest entry
+// Include the current incoming record into the pool to correctly sort historical data
+$verifiedItems[TARGET_SPA_ID] = [
+    'ID'          => (string)TARGET_SPA_ID,
+    'TITLE'       => $spaItem['item']['title'] ?? 'Incoming SPA',
+    'DATE_CREATE' => $spaItem['item']['dateCreate'] ?? date('c'),
+    'EXTRACTED_DATA' => ['phone' => $spaPhone, 'email' => $spaEmail]
+];
+
+// Sort descending by ID value (Newest items populate at the top of the list)
 uasort($verifiedItems, function($a, $b) {
     return (int)$b['ID'] - (int)$a['ID'];
 });
@@ -187,17 +203,13 @@ uasort($verifiedItems, function($a, $b) {
 $latestItem = array_shift($verifiedItems);
 $itemsToDelete = $verifiedItems;
 
-writeLog("WINNER RECORD RETAINED: SPA Item ID #{$latestItem['ID']} - '{$latestItem['TITLE']}'", 'SUCCESS');
-writeLog("DISPOSAL MATRIX CONSOLIDATED: " . count($itemsToDelete) . " duplicate items targeted.", 'WARNING');
+writeLog("RETAINED WINNER (Newest Record): ID #{$latestItem['ID']} - '{$latestItem['TITLE']}'", 'SUCCESS');
+writeLog("FLAGGED FOR DISPOSAL (Older Records): " . count($itemsToDelete) . " items inside cluster.", 'WARNING');
 
-// PHASE 4: Output Audit Logging & Factory Deletions
+// PHASE 4: Write Audit File & Delete Target Data Matrix
 $logData = [
     'timestamp' => date('Y-m-d H:i:s'),
-    'spa_source' => [
-        'id' => TARGET_SPA_ID,
-        'phone' => $spaPhone,
-        'email' => $spaEmail
-    ],
+    'incoming_trigger_id' => TARGET_SPA_ID,
     'kept_item' => $latestItem,
     'flagged_for_deletion' => array_values($itemsToDelete)
 ];
@@ -205,10 +217,10 @@ $logData = [
 file_put_contents(JSON_PREVIEW_FILE, json_encode($logData, JSON_PRETTY_PRINT));
 
 if (!DRY_RUN) {
-    writeLog("CRITICAL WARNING: Dry run bypass confirmed. Entering live system data destruction phase.", 'WARNING');
+    writeLog("CRITICAL WARNING: Dry run disabled. Executing permanent deletion loops.", 'WARNING');
     foreach ($itemsToDelete as $item) {
         $realB24Id = $item['ID'];
-        writeLog("Attempting factory destruction call on SPA Item ID #$realB24Id ('{$item['TITLE']}')");
+        writeLog("Firing deletion on duplicate SPA Item ID #$realB24Id ('{$item['TITLE']}')");
         
         $url = rtrim(B24_WEBHOOK_URL, '/') . '/crm.item.delete.json';
         $ch = curl_init();
@@ -227,17 +239,16 @@ if (!DRY_RUN) {
         $rawResult = json_decode($response, true);
         
         if (isset($rawResult['result'])) {
-            writeLog("Successfully and PERMANENTLY deleted duplicate SPA Item ID #$realB24Id from Bitrix24.", 'SUCCESS');
+            writeLog("Successfully removed duplicate SPA Item ID #$realB24Id.", 'SUCCESS');
         } else {
-            $apiError = $rawResult['error_description'] ?? $rawResult['error'] ?? 'Unknown factory rejection';
-            writeLog("System error encountered on SPA Item ID #$realB24Id: " . $apiError, 'ERROR');
-            writeLog("Raw Server Response Payload: " . $response, 'DEBUG');
+            $apiError = $rawResult['error_description'] ?? $rawResult['error'] ?? 'Unknown API block';
+            writeLog("Failure on SPA Item ID #$realB24Id: " . $apiError, 'ERROR');
         }
     }
-    writeLog("Live data purge execution pipeline concluded.", 'SUCCESS');
+    writeLog("Data purge phase concluded.", 'SUCCESS');
 } else {
-    writeLog("[DRY RUN ACTIVE]: Operations simulated. Review output data metrics inside file: " . JSON_PREVIEW_FILE, 'INFO');
+    writeLog("[DRY RUN ACTIVE]: Operations simulated. Review your flagged targets inside: " . JSON_PREVIEW_FILE, 'INFO');
 }
 
-writeLog("SCRIPT EXECUTION COMPLETED SUCCESSFULLY.");
+writeLog("SCRIPT EXECUTION COMPLETED.");
 writeLog("==========================================================================");
