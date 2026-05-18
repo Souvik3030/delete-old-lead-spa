@@ -50,7 +50,7 @@ function callB24($method, $params = []) {
         CURLOPT_POSTFIELDS => http_build_query($params),
     ]);
     $response = curl_exec($ch);
-    curl_close($ch);
+    // curl_close($ch);
     $decoded = json_decode($response, true);
     return $decoded;
 }
@@ -112,11 +112,11 @@ function resolveDryRunFlag($defaultValue) {
 
 function normalizePhone($phone) {
     // Keep a leading '+' when present and keep every digit so country codes remain part of the comparison.
-    // Examples: +91 9876543210 => +919876543210, +971 501234567 => +971501234567.
+    // Examples: +91 9876543210 => +919876543210, (+971) 501234567 => +971501234567.
     $phone = trim((string)$phone);
     $normalized = preg_replace('/[^0-9]/', '', $phone);
 
-    if (strpos($phone, '+') === 0 && $normalized !== '') {
+    if (preg_match('/^\D*\+/', $phone) && $normalized !== '') {
         return '+' . $normalized;
     }
 
@@ -174,6 +174,7 @@ function previewRecord($record, $matchedBy = []) {
         'TITLE'       => $record['TITLE'],
         'DATE_CREATE' => $record['DATE_CREATE'],
         'PHONE'       => $record['PHONE'],
+        'NORMALIZED_PHONE' => $record['NORM_PHONE'] ?? normalizePhone($record['PHONE']),
         'EMAIL'       => $record['EMAIL']
     ];
 
