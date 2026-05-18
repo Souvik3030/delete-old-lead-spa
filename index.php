@@ -1,12 +1,12 @@
 <?php
 /**
- * Bitrix24 SPA Lead Deduplication Script (Live Execution Mode)
+ * Bitrix24 SPA Lead Deduplication Script (Live Execution Mode - Array Index Fix)
  */
 
 // 1. CONFIGURATION
 define('B24_WEBHOOK_URL', 'https://b24-sgn7y5.bitrix24.in/rest/14/kdho27qenzo9pv03/');
-define('SPA_ENTITY_TYPE_ID', 1038);
-define('TARGET_SPA_ID', 2);
+define('SPA_ENTITY_TYPE_ID', 1038); 
+define('TARGET_SPA_ID', 2);         
 
 define('SPA_PHONE_FIELD', 'ufCrm8Phone'); 
 define('SPA_EMAIL_FIELD', 'ufCrm8Email'); 
@@ -227,8 +227,11 @@ file_put_contents(JSON_PREVIEW_FILE, json_encode($logData, JSON_PRETTY_PRINT));
 
 if (!DRY_RUN) {
     writeLog("CRITICAL WARNING: Dry run bypass confirmed. Entering live system data destruction phase.", 'WARNING');
-    foreach ($leadsToDelete as $id => $lead) {
-        writeLog("Attempting destructive force-deletion call on Lead ID #$id ('{$lead['TITLE']}')");
+    foreach ($leadsToDelete as $lead) {
+        // FIX: Extracting the real Bitrix24 identifier string directly from the internal entity body
+        $realB24Id = $lead['ID'];
+        
+        writeLog("Attempting destructive force-deletion call on Lead ID #$realB24Id ('{$lead['TITLE']}')");
         
         $url = rtrim(B24_WEBHOOK_URL, '/') . '/crm.lead.delete.json';
         $ch = curl_init();
@@ -237,22 +240,22 @@ if (!DRY_RUN) {
             CURLOPT_RETURNTRANSFER => true,
             CURLOPT_POST => true,
             CURLOPT_POSTFIELDS => http_build_query([
-                'id' => $id,
+                'id' => $realB24Id,
                 'params' => [
                     'FORBID_RELEASE' => 'Y' // Bypasses the Recycle Bin for permanent removal
                 ]
             ]),
         ]);
         $response = curl_exec($ch);
-        // curl_close($ch);
+        curl_close($ch);
         
         $rawResult = json_decode($response, true);
         
         if (isset($rawResult['result']) && $rawResult['result'] === true) {
-            writeLog("Successfully and PERMANENTLY deleted duplicate Lead ID #$id from Bitrix24.", 'SUCCESS');
+            writeLog("Successfully and PERMANENTLY deleted duplicate Lead ID #$realB24Id from Bitrix24.", 'SUCCESS');
         } else {
             $apiError = $rawResult['error_description'] ?? $rawResult['error'] ?? 'Unknown CRM rejection';
-            writeLog("System error encountered on Lead ID #$id: " . $apiError, 'ERROR');
+            writeLog("System error encountered on Lead ID #$realB24Id: " . $apiError, 'ERROR');
             writeLog("Raw Server Response Payload: " . $response, 'DEBUG');
         }
     }
