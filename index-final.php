@@ -19,7 +19,6 @@ define('SPA_ENTITY_TYPE_ID', 1038);
 define('SPA_PHONE_FIELD', 'ufCrm8Phone'); 
 define('SPA_EMAIL_FIELD', 'ufCrm8Email'); 
 define('MATCHING_RULE', 'same_last_10_phone_digits');
-define('MAX_SOURCE_ITEMS_PER_RUN', 1);
 
 // Code-level default. Runtime override examples:
 // URL: index.php?dry_run=true   or   index.php?dry_run=false
@@ -28,9 +27,6 @@ define('DEFAULT_DRY_RUN', true);
 $dryRunConfig = resolveDryRunFlag(DEFAULT_DRY_RUN);
 define('DRY_RUN', $dryRunConfig['value']);
 define('DRY_RUN_SOURCE', $dryRunConfig['source']);
-$sourceIdConfig = resolveOptionalIntegerParam(['source_id', 'sourceId', 'id', 'ID']);
-define('TARGET_SOURCE_ID', $sourceIdConfig['value']);
-define('TARGET_SOURCE_ID_SOURCE', $sourceIdConfig['source']);
 
 // Filesystem Output Destinations
 define('BULK_LOG_FILE', __DIR__ . '/bulk_dedup_activity.log');
@@ -115,63 +111,6 @@ function resolveDryRunFlag($defaultValue) {
 
     return [
         'value' => $parsedValue,
-        'source' => "$source value '$rawValue'"
-    ];
-}
-
-function resolveOptionalIntegerParam($acceptedKeys) {
-    $rawValue = null;
-    $source = 'not provided';
-
-    foreach ($acceptedKeys as $key) {
-        if (isset($_GET[$key])) {
-            $rawValue = $_GET[$key];
-            $source = "URL parameter '$key'";
-            break;
-        }
-
-        if (isset($_POST[$key])) {
-            $rawValue = $_POST[$key];
-            $source = "POST parameter '$key'";
-            break;
-        }
-    }
-
-    if ($rawValue === null && PHP_SAPI === 'cli' && !empty($_SERVER['argv'])) {
-        foreach (array_slice($_SERVER['argv'], 1) as $arg) {
-            if (strpos($arg, '=') === false) {
-                continue;
-            }
-
-            [$key, $value] = explode('=', $arg, 2);
-            if (in_array($key, $acceptedKeys, true)) {
-                $rawValue = $value;
-                $source = "CLI argument '$key'";
-                break;
-            }
-        }
-    }
-
-    if ($rawValue === null || $rawValue === '') {
-        return [
-            'value' => null,
-            'source' => $source
-        ];
-    }
-
-    $parsedValue = filter_var($rawValue, FILTER_VALIDATE_INT, [
-        'options' => ['min_range' => 1]
-    ]);
-
-    if ($parsedValue === false) {
-        return [
-            'value' => null,
-            'source' => "$source ignored invalid value '$rawValue'"
-        ];
-    }
-
-    return [
-        'value' => (int)$parsedValue,
         'source' => "$source value '$rawValue'"
     ];
 }
@@ -270,7 +209,6 @@ function previewRecord($record, $matchedBy = []) {
 writeLog("==========================================================================");
 writeLog("STARTING BULK SCAN: Fetching records for SPA Entity " . SPA_ENTITY_TYPE_ID . " (Stage: Start)");
 writeLog("Mode: " . (DRY_RUN ? "DRY-RUN (Flagging & Mapping)" : "LIVE DELETION") . " via " . DRY_RUN_SOURCE, DRY_RUN ? 'INFO' : 'WARNING');
-writeLog("Target source SPA ID: " . (TARGET_SOURCE_ID ? TARGET_SOURCE_ID : 'first usable fetched item') . " (" . TARGET_SOURCE_ID_SOURCE . ")");
 writeLog("Matching rule: " . MATCHING_RULE);
 
 $allRecords = [];
@@ -319,22 +257,11 @@ writeLog("Total valid records with usable Phone fetched in 'Start' stage: " . co
 $flaggedMatrix = [];
 $deletionPool = [];
 $processedIds = [];
-$sourceItemsScanned = 0;
 
 foreach ($allRecords as $source) {
-    if (TARGET_SOURCE_ID && $source['ID'] !== TARGET_SOURCE_ID) {
-        continue;
-    }
-
     if (isset($processedIds[$source['ID']])) {
         continue;
     }
-
-    if ($sourceItemsScanned >= MAX_SOURCE_ITEMS_PER_RUN) {
-        break;
-    }
-
-    $sourceItemsScanned++;
 
     writeLog("Scanning source SPA item #{$source['ID']} against 'Start' dataset...");
 
@@ -357,8 +284,7 @@ foreach ($allRecords as $source) {
 
     if (count($cluster) <= 1) {
         $processedIds[$source['ID']] = true;
-        writeLog("One-iteration mode complete: source SPA item #{$source['ID']} had no duplicates. Stopping further source scans.");
-        break;
+        continue;
     }
 
     usort($cluster, 'compareNewestRecords');
@@ -387,13 +313,6 @@ foreach ($allRecords as $source) {
         $processedIds[$dup['ID']] = true;
         $deletionPool[$dup['ID']] = $dup['ID'];
     }
-
-    writeLog("One-iteration mode complete: source SPA item #{$source['ID']} scan finished. Stopping further source scans.");
-    break;
-}
-
-if (TARGET_SOURCE_ID && $sourceItemsScanned === 0) {
-    writeLog("Target source SPA item #" . TARGET_SOURCE_ID . " was not found in the fetched Start-stage records with usable Phone.", 'WARNING');
 }
 
 $deletionPool = array_values($deletionPool);
@@ -402,8 +321,6 @@ $deletionPool = array_values($deletionPool);
 $outputData = [
     'scan_timestamp' => date('Y-m-d H:i:s'),
     'matching_rule' => MATCHING_RULE,
-    'target_source_id' => TARGET_SOURCE_ID,
-    'source_items_scanned' => $sourceItemsScanned,
     'total_duplicate_groups_found' => count($flaggedMatrix),
     'total_items_slated_for_deletion' => count($deletionPool),
     'duplicate_groups' => $flaggedMatrix
